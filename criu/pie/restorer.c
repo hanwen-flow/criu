@@ -630,18 +630,24 @@ static int restore_robust_futex(struct thread_restore_args *args)
 
 static int restore_thread_common(struct thread_restore_args *args)
 {
+	pr_debug("restore_thread_common set_tid_address\n");
 	sys_set_tid_address((int *)decode_pointer(args->clear_tid_addr));
 
+	pr_debug("restore_thread_common futex");
 	if (restore_robust_futex(args))
 		return -1;
 
+	pr_debug("restore_thread_common sched_info\n");
 	restore_sched_info(&args->sp);
 
+	pr_debug("restore_thread_common nonsigframe_gpregs\n");
 	if (restore_nonsigframe_gpregs(&args->gpregs))
 		return -1;
 
+	pr_debug("restore_thread_common tls\n");
 	restore_tls(&args->tls);
 
+	pr_debug("restore_thread_common rseq\n");
 	if (restore_rseq(&args->rseq))
 		return -1;
 
@@ -720,12 +726,13 @@ static int recv_cg_set_restore_ack(int sk)
 	h.msg_controllen = sizeof(cmsg);
 
 	while (1) {
+		pr_debug("sys_recvmsg\n");
 		ret = sys_recvmsg(sk, &h, MSG_PEEK);
 		if (ret < 0) {
 			pr_err("Unable to peek from cgroupd %d\n", ret);
 			return -1;
 		}
-
+		
 		if (h.msg_controllen != sizeof(cmsg)) {
 			pr_err("The message from cgroupd is truncated\n");
 			return -1;
@@ -733,8 +740,10 @@ static int recv_cg_set_restore_ack(int sk)
 
 		ch = CMSG_FIRSTHDR(&h);
 		cred = (struct ucred *)CMSG_DATA(ch);
-		if (cred->pid != sys_gettid())
+		if (cred->pid != sys_gettid()) {
+			pr_debug("cred pid %d != gettid\n", cred->pid);
 			continue;
+		}
 
 		/*
 		 * Actual remove message from recv queue of socket
@@ -762,6 +771,7 @@ __visible long __export_restore_thread(struct thread_restore_args *args)
 	int my_pid = sys_gettid();
 	int ret;
 
+	pr_debug("__export_restore_thread for tid %d\n", my_pid);
 	if (my_pid != args->pid) {
 		pr_err("Thread pid mismatch %d/%d\n", my_pid, args->pid);
 		goto core_restore_end;
@@ -785,14 +795,18 @@ __visible long __export_restore_thread(struct thread_restore_args *args)
 		pr_info("Restore cg_set in thread cg_set: %d\n", args->cg_set);
 		if (send_cg_set(args->cgroupd_sk, args->cg_set))
 			goto core_restore_end;
+
+		pr_debug("cg_set_restore_ack\n");
 		if (recv_cg_set_restore_ack(args->cgroupd_sk))
 			goto core_restore_end;
+		pr_debug("sys_close\n");
 		sys_close(args->cgroupd_sk);
 	}
 
 	if (restore_thread_common(args))
 		goto core_restore_end;
 
+	pr_debug("PR_SET_NAME\n");
 	ret = sys_prctl(PR_SET_NAME, (unsigned long)&args->comm, 0, 0, 0);
 	if (ret) {
 		pr_err("Unable to set a thread name: %d\n", ret);
@@ -800,23 +814,28 @@ __visible long __export_restore_thread(struct thread_restore_args *args)
 	}
 
 	pr_info("%ld: Restored\n", sys_gettid());
-
 	restore_finish_stage(task_entries_local, CR_STATE_RESTORE);
 
+	pr_debug("restore_signals\n");
 	if (restore_signals(args->siginfo, args->siginfo_n, false))
 		goto core_restore_end;
 
+	pr_debug("restore_finish_stage\n");
 	restore_finish_stage(task_entries_local, CR_STATE_RESTORE_SIGCHLD);
 
 	/*
 	 * Make sure it's before creds, since it's privileged
 	 * operation bound to uid 0 in current user ns.
 	 */
+	pr_debug("restore_seccomp\n");
 	if (restore_seccomp(args))
 		BUG();
 
+	pr_debug("restore_creds\n");
 	ret = restore_creds(args->creds_args, args->ta->proc_fd, args->ta->lsm_type, args->ta->uid);
+	pr_debug("restore_dumpable_flag\n");
 	ret = ret || restore_dumpable_flag(&args->ta->mm);
+	pr_debug("restore_pdeath_sig\n");
 	ret = ret || restore_pdeath_sig(args);
 	if (ret)
 		BUG();
@@ -825,6 +844,7 @@ __visible long __export_restore_thread(struct thread_restore_args *args)
 
 	futex_dec_and_wake(&thread_inprogress);
 
+	pr_debug("doing sigreturn for tid %d/%ld\n", my_pid, sys_gettid());
 	new_sp = (long)rt_sigframe + RT_SIGFRAME_OFFSET(rt_sigframe);
 	rst_sigreturn(new_sp, rt_sigframe);
 
@@ -1685,7 +1705,7 @@ __visible long __export_restore_task(struct task_restore_args *args)
 	std_log_set_loglevel(args->loglevel);
 	std_log_set_start(&args->logstart);
 
-	pr_info("Switched to the restorer %d\n", my_pid);
+	pr_info("task: Switched to the restorer %d\n", my_pid);
 
 	if (args->uffd > -1) {
 		pr_debug("lazy-pages: uffd %d\n", args->uffd);
@@ -1782,12 +1802,12 @@ __visible long __export_restore_task(struct task_restore_args *args)
 
 	ret = sys_prctl(PR_SET_THP_DISABLE, args->thp_disabled, 0, 0, 0);
 	if (ret) {
-		pr_err("Cannot restore THP_DISABLE=%d flag: %ld\n", args->thp_disabled, ret);
+		pr_err("task: Cannot restore THP_DISABLE=%d flag: %ld\n", args->thp_disabled, ret);
 		goto core_restore_end;
 	}
 
 	if (args->uffd > -1) {
-		pr_debug("lazy-pages: closing uffd %d\n", args->uffd);
+		pr_debug("task: lazy-pages: closing uffd %d\n", args->uffd);
 		/*
 		 * All userfaultfd configuration has finished at this point.
 		 * Let's close the UFFD file descriptor, so that the restored
@@ -1811,7 +1831,7 @@ __visible long __export_restore_task(struct task_restore_args *args)
 		va = restore_mapping(vma_entry);
 
 		if (va != vma_entry->start) {
-			pr_err("Can't restore %" PRIx64 " mapping with %lx\n", vma_entry->start, va);
+			pr_err("task: Can't restore %" PRIx64 " mapping with %lx\n", vma_entry->start, va);
 			goto core_restore_end;
 		}
 	}
@@ -1827,7 +1847,7 @@ __visible long __export_restore_task(struct task_restore_args *args)
 		ssize_t r;
 
 		while (nr) {
-			pr_debug("Preadv %lx:%d... (%d iovs)\n", (unsigned long)iovs->iov_base, (int)iovs->iov_len, nr);
+			pr_debug("task: Preadv %lx:%d... (%d iovs)\n", (unsigned long)iovs->iov_base, (int)iovs->iov_len, nr);
 			/*
 			 * If we're requested to punch holes in the file after reading we do
 			 * it to save memory. Limit the reads then to an arbitrary block size.
@@ -1835,25 +1855,25 @@ __visible long __export_restore_task(struct task_restore_args *args)
 			r = preadv_limited(args->vma_ios_fd, iovs, nr, rio->off,
 					   args->auto_dedup ? AUTO_DEDUP_OVERHEAD_BYTES : 0);
 			if (r < 0) {
-				pr_err("Can't read pages data (%d)\n", (int)r);
+				pr_err("task: Can't read pages data (%d)\n", (int)r);
 				goto core_restore_end;
 			}
 
-			pr_debug("`- returned %ld\n", (long)r);
+			pr_debug("task: `- returned %ld\n", (long)r);
 			/* If the file is open for writing, then it means we should punch holes
 			 * in it. */
 			if (r > 0 && args->auto_dedup) {
 				int fr = sys_fallocate(args->vma_ios_fd, FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE,
 						       rio->off, r);
 				if (fr < 0) {
-					pr_debug("Failed to punch holes with fallocate: %d\n", fr);
+					pr_debug("task: Failed to punch holes with fallocate: %d\n", fr);
 				}
 			}
 			rio->off += r;
 			/* Advance the iovecs */
 			do {
 				if (iovs->iov_len <= r) {
-					pr_debug("   `- skip pagemap\n");
+					pr_debug("task:    `- skip pagemap\n");
 					r -= iovs->iov_len;
 					iovs++;
 					nr--;
@@ -1922,7 +1942,7 @@ __visible long __export_restore_task(struct task_restore_args *args)
 			if (vma_entry->madv & (1ul << m)) {
 				ret = sys_madvise(vma_entry->start, vma_entry_len(vma_entry), m);
 				if (ret) {
-					pr_err("madvise(%" PRIx64 ", %" PRIu64 ", %ld) "
+					pr_err("task: madvise(%" PRIx64 ", %" PRIu64 ", %ld) "
 					       "failed with %ld\n",
 					       vma_entry->start, vma_entry_len(vma_entry), m, ret);
 					goto core_restore_end;
@@ -2001,7 +2021,7 @@ __visible long __export_restore_task(struct task_restore_args *args)
 		ret |= restore_self_exe_late(args);
 	} else {
 		if (ret)
-			pr_err("sys_prctl(PR_SET_MM, PR_SET_MM_MAP) failed with %d\n", (int)ret);
+			pr_err("task: sys_prctl(PR_SET_MM, PR_SET_MM_MAP) failed with %d\n", (int)ret);
 		sys_close(args->fd_exe_link);
 	}
 
@@ -2045,6 +2065,7 @@ __visible long __export_restore_task(struct task_restore_args *args)
 	 */
 
 	if (args->nr_threads > 1) {
+	  
 		struct thread_restore_args *thread_args = args->thread_args;
 		long clone_flags = CLONE_VM | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM | CLONE_FS;
 		long last_pid_len;
@@ -2056,7 +2077,7 @@ __visible long __export_restore_task(struct task_restore_args *args)
 			/* One level pid ns hierarhy */
 			fd = sys_openat(args->proc_fd, LAST_PID_PATH, O_RDWR, 0);
 			if (fd < 0) {
-				pr_err("can't open last pid fd %d\n", fd);
+				pr_err("task: can't open last pid fd %d\n", fd);
 				goto core_restore_end;
 			}
 		}
@@ -2064,11 +2085,11 @@ __visible long __export_restore_task(struct task_restore_args *args)
 
 		for (i = 0; i < args->nr_threads; i++) {
 			char last_pid_buf[16], *s;
-
 			/* skip self */
 			if (thread_args[i].pid == args->t->pid)
 				continue;
 
+			pr_debug("task: scheduling restore for pie: %d\n", thread_args[i].pid);
 			new_sp = restorer_stack(thread_args[i].mz);
 			if (args->has_clone3_set_tid) {
 				struct _clone_args c_args = {};
@@ -2081,7 +2102,7 @@ __visible long __export_restore_task(struct task_restore_args *args)
 				c_args.stack_size = RESTORE_STACK_SIZE;
 				c_args.child_tid = ptr_to_u64(&thread_args[i].pid);
 				c_args.parent_tid = ptr_to_u64(&parent_tid);
-				pr_debug("Using clone3 to restore the process\n");
+				pr_debug("task: Using clone3 to restore the process\n");
 				RUN_CLONE3_RESTORE_FN(ret, c_args, sizeof(c_args), &thread_args[i],
 						      args->clone_restore_fn);
 			} else {
@@ -2090,7 +2111,7 @@ __visible long __export_restore_task(struct task_restore_args *args)
 				sys_lseek(fd, 0, SEEK_SET);
 				ret = sys_write(fd, s, last_pid_len);
 				if (ret < 0) {
-					pr_err("Can't set last_pid %ld/%s\n", ret, s);
+					pr_err("task: Can't set last_pid %ld/%s\n", ret, s);
 					sys_close(fd);
 					mutex_unlock(&task_entries_local->last_pid_mutex);
 					goto core_restore_end;
@@ -2106,7 +2127,7 @@ __visible long __export_restore_task(struct task_restore_args *args)
 						     args->clone_restore_fn);
 			}
 			if (ret != thread_args[i].pid) {
-				pr_err("Unable to create a thread: %ld\n", ret);
+				pr_err("task: Unable to create a thread: %ld\n", ret);
 				sys_close(fd);
 				mutex_unlock(&task_entries_local->last_pid_mutex);
 				goto core_restore_end;
@@ -2118,39 +2139,52 @@ __visible long __export_restore_task(struct task_restore_args *args)
 			sys_close(fd);
 	}
 
+	pr_info("task: restore_rlims\n");
 	restore_rlims(args);
 
+	pr_info("task: create_posix_timers\n");
 	ret = create_posix_timers(args);
 	if (ret < 0) {
-		pr_err("Can't restore posix timers %ld\n", ret);
+		pr_err("task: Can't restore posix timers %ld\n", ret);
 		goto core_restore_end;
 	}
 
+
+	pr_info("task: timerfd_arm\n");
 	ret = timerfd_arm(args);
 	if (ret < 0) {
-		pr_err("Can't restore timerfd %ld\n", ret);
+		pr_err("task: Can't restore timerfd %ld\n", ret);
 		goto core_restore_end;
 	}
 
+	pr_info("task: restore_membarrier_registrations\n");
 	if (restore_membarrier_registrations(args->membarrier_registration_mask) < 0)
 		goto core_restore_end;
 
-	pr_info("%ld: Restored\n", sys_getpid());
+	pr_info("task: %ld: Restored\n", sys_getpid());
 
+	pr_info("task: restore_finish_stage\n");
+	// threads still joining cgroups. this is a wait point.
+	
 	restore_finish_stage(task_entries_local, CR_STATE_RESTORE);
-
+	// here all the threads are in their cgroups.
+	
+	pr_info("task: wait_helpers\n");
 	if (wait_helpers(args) < 0)
 		goto core_restore_end;
+	pr_info("task: wait_zombies\n");
 	if (wait_zombies(args) < 0)
 		goto core_restore_end;
 
+	pr_info("task: ksigfillset\n");
 	ksigfillset(&to_block);
 	ret = sys_sigprocmask(SIG_SETMASK, &to_block, NULL, sizeof(k_rtsigset_t));
 	if (ret) {
-		pr_err("Unable to block signals %ld\n", ret);
+		pr_err("task: Unable to block signals %ld\n", ret);
 		goto core_restore_end;
 	}
 
+	pr_info("task: cleanup_current_inotify_events\n");
 	if (cleanup_current_inotify_events(args))
 		goto core_restore_end;
 
@@ -2160,33 +2194,38 @@ __visible long __export_restore_task(struct task_restore_args *args)
 		void *stack = alloc_compat_syscall_stack();
 
 		if (!stack) {
-			pr_err("Failed to allocate 32-bit stack for sigaction\n");
+			pr_err("task: Failed to allocate 32-bit stack for sigaction\n");
 			goto core_restore_end;
 		}
 		ret = arch_compat_rt_sigaction(stack, SIGCHLD, (void *)&args->sigchld_act);
 		free_compat_syscall_stack(stack);
 	}
 	if (ret) {
-		pr_err("Failed to restore SIGCHLD: %ld\n", ret);
+		pr_err("task: Failed to restore SIGCHLD: %ld\n", ret);
 		goto core_restore_end;
 	}
 
+	pr_info("task: restore_signals\n");
 	ret = restore_signals(args->siginfo, args->siginfo_n, true);
 	if (ret)
 		goto core_restore_end;
 
+	pr_info("task: restore_signals 2\n");
 	ret = restore_signals(args->t->siginfo, args->t->siginfo_n, false);
 	if (ret)
 		goto core_restore_end;
 
+	pr_info("task: restore_finish_stage\n");
 	restore_finish_stage(task_entries_local, CR_STATE_RESTORE_SIGCHLD);
 
+	pr_info("task: rst_tcp_socks_all\n");
 	rst_tcp_socks_all(args);
 
 	/*
 	 * Make sure it's before creds, since it's privileged
 	 * operation bound to uid 0 in current user ns.
 	 */
+	pr_info("task: restore_seccomp\n");
 	if (restore_seccomp(args->t))
 		goto core_restore_end;
 
@@ -2195,9 +2234,13 @@ __visible long __export_restore_task(struct task_restore_args *args)
 	 * turning off TCP repair is CAP_SYS_NED_ADMIN protected,
 	 * thus restore* creds _after_ all of the above.
 	 */
+	pr_info("task: restore_creds\n");
 	ret = restore_creds(args->t->creds_args, args->proc_fd, args->lsm_type, args->uid);
+	pr_info("task: restore_dumpable_flag\n");
 	ret = ret || restore_dumpable_flag(&args->mm);
+	pr_info("task: restore_pdeath_sig\n");
 	ret = ret || restore_pdeath_sig(args->t);
+	pr_info("task: restore_child_subreaper\n");
 	ret = ret || restore_child_subreaper(args->child_subreaper);
 
 	futex_set_and_wake(&thread_inprogress, args->nr_threads);
@@ -2207,15 +2250,18 @@ __visible long __export_restore_task(struct task_restore_args *args)
 	 * threads were cloned, otherwise they may start with read-only
 	 * shadow stack.
 	 */
+	pr_info("task: arch_shstk_switch_to_restorer\n");
 	if (arch_shstk_restore(&args->shstk))
 		goto core_restore_end;
 
+	pr_info("task: restore_finish_stage\n");
 	restore_finish_stage(task_entries_local, CR_STATE_RESTORE_CREDS);
 
 	if (ret)
 		BUG();
 
 	/* Wait until children stop to use args->task_entries */
+	pr_info("task: thread_inprogress\n");
 	futex_wait_while_gt(&thread_inprogress, 1);
 
 	sys_close(args->proc_fd);
@@ -2235,8 +2281,10 @@ __visible long __export_restore_task(struct task_restore_args *args)
 	if (itimer_armed(args, 2))
 		sys_setitimer(ITIMER_PROF, &args->itimers[2], NULL);
 
+	pr_info("task: restore_posix_timers\n");
 	restore_posix_timers(args);
 
+	pr_info("task: sys_unmap\n");
 	sys_munmap(args->rst_mem, args->rst_mem_size);
 
 	/*
@@ -2249,6 +2297,7 @@ __visible long __export_restore_task(struct task_restore_args *args)
 	 * pure assembly since we don't need any additional
 	 * code insns from gcc.
 	 */
+	pr_info("task: rst_sigreturn\n");
 	rst_sigreturn(new_sp, rt_sigframe);
 
 core_restore_end:
