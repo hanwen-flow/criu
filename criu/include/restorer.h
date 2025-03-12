@@ -102,6 +102,7 @@ struct thread_restore_args {
 
 	u64 futex_rla;
 	u32 futex_rla_len;
+	futex_t futex_cgroup_ack;
 
 	struct rst_sched_param sp;
 
@@ -219,6 +220,8 @@ struct task_restore_args {
 	 */
 	int proc_fd;
 
+	int cgroup_listener_sk;
+	
 	int seccomp_mode;
 
 	bool compatible_mode;

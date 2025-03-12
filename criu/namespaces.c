@@ -1449,7 +1449,7 @@ int start_unix_cred_daemon(pid_t *pid, int (*daemon_func)(int sk))
 
 	/*
 	 * Seqpacket to
-	 *
+n	 *
 	 * a) Help daemon distinguish individual requests from
 	 *    each other easily. Stream socket require manual
 	 *    messages boundaries.
@@ -1486,7 +1486,9 @@ int start_unix_cred_daemon(pid_t *pid, int (*daemon_func)(int sk))
 	if (*pid == 0) {
 		int ret;
 		close(sk[0]);
+
 		ret = daemon_func(sk[1]);
+		pr_debug("unix_cred_daemon PID %d exit\n", getpid());
 		exit(ret);
 	}
 	close(sk[1]);

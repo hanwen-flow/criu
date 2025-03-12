@@ -710,9 +710,7 @@ static int send_cg_set(int sk, int cg_set)
 }
 
 /*
- * As this socket is shared among threads, recvmsg(MSG_PEEK)
- * from the socket until getting its own thread id as an
- * acknowledge of successful threaded cgroup fixup
+ * return the PID. 0 if EOF or -1 on error.
  */
 static int recv_cg_set_restore_ack(int sk)
 {
@@ -725,38 +723,24 @@ static int recv_cg_set_restore_ack(int sk)
 	h.msg_control = cmsg;
 	h.msg_controllen = sizeof(cmsg);
 
-	while (1) {
-		pr_debug("sys_recvmsg\n");
-		ret = sys_recvmsg(sk, &h, MSG_PEEK);
-		if (ret < 0) {
-			pr_err("Unable to peek from cgroupd %d\n", ret);
-			return -1;
-		}
-		
-		if (h.msg_controllen != sizeof(cmsg)) {
-			pr_err("The message from cgroupd is truncated\n");
-			return -1;
-		}
-
-		ch = CMSG_FIRSTHDR(&h);
-		cred = (struct ucred *)CMSG_DATA(ch);
-		if (cred->pid != sys_gettid()) {
-			pr_debug("cred pid %d != gettid\n", cred->pid);
-			continue;
-		}
-
-		/*
-		 * Actual remove message from recv queue of socket
-		 */
-		ret = sys_recvmsg(sk, &h, 0);
-		if (ret < 0) {
-			pr_err("Unable to receive from cgroupd %d\n", ret);
-			return -1;
-		}
-
-		break;
+	pr_debug("sys_recvmsg\n");
+	ret = sys_recvmsg(sk, &h, MSG_WAITALL);
+	if (ret == 0) {
+		return 0;	/* EOF */
 	}
-	return 0;
+	if (ret < 0) {
+		pr_err("Unable to peek from cgroupd: %d\n", ret);
+		return -1;
+	}
+		
+	if (h.msg_controllen != sizeof(cmsg)) {
+		pr_err("The message from cgroupd is truncated got %lu want %lu\n", h.msg_controllen, sizeof(cmsg));
+		return -1;
+	}
+
+	ch = CMSG_FIRSTHDR(&h);
+	cred = (struct ucred *)CMSG_DATA(ch);
+	return cred->pid;
 }
 
 /*
@@ -792,14 +776,14 @@ __visible long __export_restore_thread(struct thread_restore_args *args)
 	rt_sigframe = (void *)&args->mz->rt_sigframe;
 
 	if (args->cg_set != -1) {
+		futex_set(&args->futex_cgroup_ack, 1);
 		pr_info("Restore cg_set in thread cg_set: %d\n", args->cg_set);
 		if (send_cg_set(args->cgroupd_sk, args->cg_set))
 			goto core_restore_end;
 
-		pr_debug("cg_set_restore_ack\n");
-		if (recv_cg_set_restore_ack(args->cgroupd_sk))
-			goto core_restore_end;
-		pr_debug("sys_close\n");
+		pr_debug("futex_cgroup_ack\n");
+		futex_wait_until(&args->futex_cgroup_ack, 0);
+		pr_debug("futex_cgroup_acked\n");
 		sys_close(args->cgroupd_sk);
 	}
 
@@ -2065,7 +2049,6 @@ __visible long __export_restore_task(struct task_restore_args *args)
 	 */
 
 	if (args->nr_threads > 1) {
-	  
 		struct thread_restore_args *thread_args = args->thread_args;
 		long clone_flags = CLONE_VM | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM | CLONE_FS;
 		long last_pid_len;
@@ -2164,10 +2147,59 @@ __visible long __export_restore_task(struct task_restore_args *args)
 	pr_info("task: %ld: Restored\n", sys_getpid());
 
 	pr_info("task: restore_finish_stage\n");
-	// threads still joining cgroups. this is a wait point.
+
+	/* threads still joining cgroups here */
+
+	if (args->nr_threads > 1) {
+		struct thread_restore_args *thread_args = args->thread_args;
+		int cg_set_count = 0;
+		int i = 0;
+		for (i = 0; i < args->nr_threads; i++) {
+			if (thread_args[i].cg_set != -1) {
+				cg_set_count++;
+			}
+		}
+
+		pr_debug("reading cgroup ack for %d threads\n", cg_set_count);
+		while (cg_set_count > 0) {
+			int pid = recv_cg_set_restore_ack(args->cgroup_listener_sk);
+			pr_debug("got pid %d for ack\n", pid);
+			if (!pid) break;
+			if (pid < 0) {
+				goto core_restore_end;
+			}
+			/* still quadratic, but without the syscall
+			   overhead. Ideas:
+
+			 - sort threads by PID, then use binary search?
+			 - make a hashmap of PID -> index. 
+			 - send index to cgroupd, and have it send back the id.
+			*/ 
+			for (i = 0; i < args->nr_threads; i++) {
+				if (thread_args[i].pid == pid) {
+					futex_set_and_wake(&thread_args[i].futex_cgroup_ack, 0);
+					break;
+				}
+			}
+			if (i == args->nr_threads) {
+				pr_err("could not find pid %d for cgroup ack", pid);
+			}
+
+			cg_set_count--;
+		}
+
+		if (cg_set_count > 0) {
+			pr_err("still have %d threads left for cgroup set, but connection shut down\n", cg_set_count);
+			goto core_restore_end;
+		}
+		if (args->cgroup_listener_sk) {
+			sys_close(args->cgroup_listener_sk);
+			args->cgroup_listener_sk = 0;
+		}
+	}
 	
 	restore_finish_stage(task_entries_local, CR_STATE_RESTORE);
-	// here all the threads are in their cgroups.
+	/* here all the threads are in their cgroups. */
 	
 	pr_info("task: wait_helpers\n");
 	if (wait_helpers(args) < 0)

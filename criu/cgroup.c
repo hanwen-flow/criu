@@ -1982,7 +1982,7 @@ static int cgroupd(int sk)
 	if (cgroupd_unblock_sigterm())
 		return -1;
 
-	pr_info("cgroud: Daemon started\n");
+	pr_info("cgroupd: Daemon started\n");
 
 	while (1) {
 		struct unsc_msg um;
@@ -2056,6 +2056,7 @@ static int cgroupd(int sk)
 		 * thread id.
 		 */
 		unsc_msg_init(&um, &call, &cg_set, NULL, 0, 0, &tid);
+		pr_debug("finished %d into cgset %d, send msg\n", tid, cg_set);
 		if (sendmsg(sk, &um.h, 0) <= 0) {
 			pr_perror("cgroupd: send req error");
 			return -1;
@@ -2092,6 +2093,7 @@ static int prepare_cgroup_thread_sfd(void)
 	int sk;
 
 	sk = start_unix_cred_daemon(&cgroupd_pid, cgroupd);
+	pr_debug("cgroupd pid %d started\n", cgroupd_pid); 
 	if (sk < 0) {
 		pr_err("failed to start cgroupd\n");
 		return -1;

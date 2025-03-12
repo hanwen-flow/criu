@@ -3377,6 +3377,9 @@ static int sigreturn_restore(pid_t pid, struct task_restore_args *task_args, uns
 		if (tcore->thread_core->has_cg_set && rsti(current)->cg_set != tcore->thread_core->cg_set) {
 			thread_args[i].cg_set = tcore->thread_core->cg_set;
 			thread_args[i].cgroupd_sk = dup(get_service_fd(CGROUPD_SK));
+
+			if (!task_args->cgroup_listener_sk)
+			  task_args->cgroup_listener_sk = dup(get_service_fd(CGROUPD_SK));
 		} else {
 			thread_args[i].cg_set = -1;
 		}
