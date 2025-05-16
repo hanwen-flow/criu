@@ -423,7 +423,7 @@ static int setup_opts_from_req(int sk, CriuOpts *req)
 		/* Use the value from one of the other configuration files. */
 		strncpy(work_dir_path, opts.work_dir, PATH_MAX - 1);
 	else
-		/* Use the images directory a work directory. */
+		/* Use the images directory as work directory. */
 		strcpy(work_dir_path, images_dir_path);
 
 	if (chdir(work_dir_path)) {
