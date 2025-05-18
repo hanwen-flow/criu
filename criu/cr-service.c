@@ -283,6 +283,29 @@ int exec_rpc_query_external_files(char *name, int sk)
 	return ret;
 }
 
+/* allow socket to be in imagedir if workdir is different. */
+static int symlink_lazy_pages_socket(const char *work_dir_path, const char *images_dir_path) {
+	char wd_socket[PATH_MAX], id_socket[PATH_MAX];
+	struct stat wd_st, id_st;
+	if (snprintf(wd_socket, sizeof(wd_socket), "%s/%s", work_dir_path, LAZY_PAGES_SOCK_NAME) >= PATH_MAX -1) {
+		pr_err("path too long");
+		return -1;
+	}
+	if (snprintf(id_socket, sizeof(id_socket), "%s/%s", images_dir_path, LAZY_PAGES_SOCK_NAME) >= PATH_MAX -1) {
+		pr_err("path too long");
+		return -1;
+	}
+	if (lstat(wd_socket, &wd_st) != 0 && lstat(id_socket, &id_st) == 0 &&
+	    S_ISSOCK(id_st.st_mode)) {
+		int err = symlink(id_socket, wd_socket);
+		if (err != 0) {
+			pr_perror("can't symlinks %s <- %s", id_socket, wd_socket);
+		}
+		return err;
+	}
+	return 0;
+}
+
 static char images_dir[PATH_MAX];
 
 static int setup_opts_from_req(int sk, CriuOpts *req)
@@ -426,6 +449,11 @@ static int setup_opts_from_req(int sk, CriuOpts *req)
 		/* Use the images directory as work directory. */
 		strcpy(work_dir_path, images_dir_path);
 
+
+	if (symlink_lazy_pages_socket(work_dir_path, images_dir_path)) {
+		goto err;
+	}
+	
 	if (chdir(work_dir_path)) {
 		pr_perror("Can't chdir to work_dir");
 		goto err;

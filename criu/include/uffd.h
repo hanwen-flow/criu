@@ -1,6 +1,8 @@
 #ifndef __CR_UFFD_H_
 #define __CR_UFFD_H_
 
+#define LAZY_PAGES_SOCK_NAME "lazy-pages.socket"
+
 struct task_restore_args;
 
 extern int uffd_open(int flags, unsigned long *features, int *err);
